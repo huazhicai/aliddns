@@ -1,33 +1,58 @@
+# coding:utf-8
+import random
 from aliyunsdkalidns.request.v20150109.DescribeDomainRecordInfoRequest import DescribeDomainRecordInfoRequest
 from aliyunsdkcore import client
 from aliyunsdkalidns.request.v20150109 import DescribeDomainRecordsRequest, UpdateDomainRecordRequest
 import json, re, requests
+import requests.exceptions
 import time
 import logging
+from logging.handlers import TimedRotatingFileHandler
 
-logging.basicConfig(filename='alidns.log', level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
+from aliyunsdkcore.acs_exception.exceptions import ServerException
+
+from send_email import send_mail
+
+
+# logging初始化工作
+logging.basicConfig()
+# alidns 日志器初始化
+alidns = logging.getLogger('alidns')
+alidns.setLevel(logging.DEBUG)
+
+
+timefilehandler = TimedRotatingFileHandler('./config/alidns.log', when='D', interval=1, backupCount=3)
+timefilehandler.suffix = "%Y-%m-%d.log"
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+# 为时间处理器设置格式
+timefilehandler.setFormatter(formatter)
+alidns.addHandler(timefilehandler)
 
 access_key_id = "LTAI2uCU1NS2Rpk3"
 access_Key_secret = "drMg8quTOTL7L0xDKcA13fcVkc6u1H"
 RegionID = "cn-hangzhou"
 Type = "A"
-# current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-with open('config.json') as f:
+with open('./config/config.json') as f:
     config = json.load(f)
     DomainName = config['DomainName']
     HostName = config['HostNameList']
 
-
-# ip_proxy = ["http://www.taobao.com/help/getip.php", "http://ip.chinaz.com/getip.aspx", "http://ip.cn/"]
+# ip接口池
+ip_proxy = ["http://www.taobao.com/help/getip.php", "http://pv.sohu.com/cityjson", "http://txt.go.sohu.com/ip/soip"]
 
 
 def local_ip():
-    ip_response = requests.get("http://www.taobao.com/help/getip.php").text
-    # ip_response = requests.get(proxies={'http': random.choice(ip_proxy)}).text
-    ip_patern = re.compile(r'\d+\.\d+\.\d+\.\d+')
-    ip_value = ip_patern.findall(ip_response)[0]
-    return ip_value
+    try:
+        url = random.choice(ip_proxy)
+        ip_response = requests.get(url, timeout=5)
+        alidns.debug(url + " - " + str(ip_response.status_code))
+        ip_patern = re.compile(r'\d+\.\d+\.\d+\.\d+')
+        ip_value = ip_patern.findall(ip_response.text)[0]
+        return ip_value
+    except:
+        local_ip()
 
 
 # 检查第一页阿里云的ip
@@ -53,9 +78,12 @@ def old_ip(recordId):
     request = DescribeDomainRecordInfoRequest()
     request.set_RecordId(recordId)
     request.set_accept_format('json')
-    result = clt.do_action_with_exception(request)
-    result = json.loads(result)['Value']
-    return result
+    try:
+        result = clt.do_action_with_exception(request)
+        result = json.loads(result)['Value']
+        return result
+    except ServerException as e:
+        logging.debug(e.get_error_code(), e.get_error_msg(), e.get_http_status())
 
 
 # 更新阿里的dns
@@ -77,14 +105,16 @@ def update_dns(HostName, RecordId, Type, IP):
     # 添加搜索字段IP值
     request.set_Value(IP)
     # 客户端执行上述添加的操作
-    result = clt.do_action_with_exception(request)
+    try:
+        result = clt.do_action_with_exception(request)
+        results = json.loads(result)
+        return results
+    except ServerException as e:
+        logging.debug(e.get_error_code(), e.get_error_msg(), e.get_http_status())
     # 输出结果转换成dict,( json.loads:str转成dict)
-    results = json.loads(result)
-    return results
 
 
 def main():
-    localIP = local_ip()
     # 返回阿里云第一页的域名记录
     result = check_records('listenrobot.cn')
     Records = result['DomainRecords']['Record']
@@ -98,18 +128,29 @@ def main():
         Records += result_2['DomainRecords']['Record']
         PageNumber += 1
     # print(Records)
-
+    # 服务器本地ip
+    localIP = local_ip()
     for item in Records:
         if item['RR'] == HostName and item['Type'] == Type:
             RecordId = item['RecordId']
             oldIP = old_ip(RecordId)
-            if oldIP != localIP:
-                update_dns(HostName, RecordId, Type, localIP)
-                logging.debug(HostName + ': Current IP is %s, Old IPAdress is %s,IPAddress has been changed.....\n' % (
-                localIP, oldIP))
+
+            while oldIP == localIP:
+                localIP = local_ip()
+                time.sleep(60)
+
+            if update_dns(HostName, RecordId, Type, localIP):
+                alidns.debug(HostName + ': Current IP is %s, Old IP is %s, IP has been changed.....\n' % (
+                    localIP, oldIP))
+                send_mail(HostName, '%s: Current IP is %s, Old IP is %s, IP has been changed.....\n' % (
+                    current_time, localIP, oldIP))
+
+            else:
+                alidns.debug("{} update failed".format(HostName))
+                send_mail(HostName, "update failed")
+            main()
+    alidns.debug('{} not exists in aliyun.'.format(HostName))
 
 
 if __name__ == '__main__':
-    while True:
-        main()
-        time.sleep(120)
+    main()
