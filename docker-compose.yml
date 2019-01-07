@@ -1,0 +1,11 @@
+version: '3'
+services:
+  aliddns:     
+      build: .
+      restart: always
+      container_name: aliddns
+      env_file: .env
+      network_mode: "host"
+      volumes:
+        - /etc/localtime:/etc/localtime
+

@@ -1,0 +1,6 @@
+aliyun-python-sdk-alidns==2.0.7
+aliyun-python-sdk-core-v3==2.3.7
+#aliyun-python-sdk-core==2.6.2
+#pycrypto==2.6.1
+requests==2.14.2
+
